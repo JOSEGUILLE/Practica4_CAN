@@ -42,6 +42,7 @@
 
 #include "pin_mux.h"
 #include "clock_config.h"
+#include "fsl_adc16.h"
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
@@ -58,12 +59,18 @@
 #define RX2_MESSAGE_BUFFER_NUM (9)
 #define TX100_MESSAGE_BUFFER_NUM (8)
 #define TX50_MESSAGE_BUFFER_NUM (7)
+
+#define DEMO_ADC16_BASE (ADC0)
+#define DEMO_ADC16_CHANNEL_GROUP (0U)
+#define DEMO_ADC16_USER_CHANNEL (12U)
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
 static void task_100ms(void *pvParameters);
 static void task_50ms(void *pvParameters);
 static void task_rx(void *pvParameters);
+void ADC0_IRQHandler(void);
+void ADC_init(void);
 /*******************************************************************************
  * Variables
  ******************************************************************************/
@@ -79,9 +86,42 @@ uint32_t tx50Identifier = 0x50;
 uint32_t rx1Identifier = 0x101;
 uint32_t rx2Identifier = 0x102;
 
+// ADC
+volatile bool g_Adc16ConversionDoneFlag = false;
+volatile uint32_t g_Adc16ConversionValue;
+static adc16_channel_config_t adc16ChannelConfigStruct;
+
 /*******************************************************************************
  * Code
  ******************************************************************************/
+void ADC0_IRQHandler(void)
+{
+    g_Adc16ConversionDoneFlag = true;
+    g_Adc16ConversionValue = ADC16_GetChannelConversionValue(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP);
+    /* Add for ARM errata 838869, affects Cortex-M4, Cortex-M4F Store immediate overlapping
+      exception return operation might vector to incorrect interrupt */
+#if defined __CORTEX_M && (__CORTEX_M == 4U)
+    __DSB();
+#endif
+}
+
+void ADC_init(void)
+{
+    adc16_config_t adc16ConfigStruct;
+
+
+    NVIC_EnableIRQ(ADC0_IRQn);
+    ADC16_GetDefaultConfig(&adc16ConfigStruct);
+    ADC16_Init(DEMO_ADC16_BASE, &adc16ConfigStruct);
+    ADC16_EnableHardwareTrigger(DEMO_ADC16_BASE, false); /* Make sure the software trigger is used. */
+    (void)ADC16_DoAutoCalibration(DEMO_ADC16_BASE);
+    adc16ChannelConfigStruct.channelNumber = DEMO_ADC16_USER_CHANNEL;
+    adc16ChannelConfigStruct.enableInterruptOnConversionCompleted = true;
+    adc16ChannelConfigStruct.enableDifferentialConversion = false;
+    ADC16_SetChannelConfig(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP, &adc16ChannelConfigStruct);
+
+}
+
 /*!
  * @brief Application entry point.
  */
@@ -155,6 +195,7 @@ void CAN_Init(void)
 	    FLEXCAN_SetTxMbConfig(EXAMPLE_CAN, TX50_MESSAGE_BUFFER_NUM, true);
 }
 
+
 int main(void)
 {
 
@@ -163,6 +204,7 @@ int main(void)
 	BOARD_BootClockRUN();
 	BOARD_InitDebugConsole();
 	CAN_Init();
+	ADC_init();
 
     xTaskCreate(task_100ms, "100ms Task", configMINIMAL_STACK_SIZE + 10, NULL, hello_task_PRIORITY, NULL);
     xTaskCreate(task_50ms, "50ms Task", configMINIMAL_STACK_SIZE + 10, NULL, hello_task_PRIORITY, NULL);
@@ -233,6 +275,13 @@ static void task_50ms(void *pvParameters)
 
     	tx50Frame.dataByte0 = 50;
     	tx50Frame.dataByte1++;
+
+    	// Send to update ADC
+    	if(true == g_Adc16ConversionDoneFlag)
+    	{
+    		ADC16_SetChannelConfig(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP, &adc16ChannelConfigStruct);
+    		g_Adc16ConversionDoneFlag = false;
+    	}
 
         // Wait for the next cycle.
         vTaskDelayUntil( &xLastWakeTime, xFrequency);
