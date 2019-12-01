@@ -42,6 +42,7 @@
 
 #include "pin_mux.h"
 #include "clock_config.h"
+#include "fsl_adc16.h"
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
@@ -58,9 +59,22 @@
 #define RX2_MESSAGE_BUFFER_NUM (9)
 #define TX100_MESSAGE_BUFFER_NUM (8)
 #define TX50_MESSAGE_BUFFER_NUM (7)
+
+#define DEMO_ADC16_BASE (ADC0)
+#define DEMO_ADC16_CHANNEL_GROUP (0U)
+#define DEMO_ADC16_USER_CHANNEL (12U)
+
+/* LED AZUL*/
+#define BOARD_LED_B_GPIO BOARD_LED_BLUE_GPIO
+#define BOARD_LED_B_GPIO_PIN BOARD_LED_BLUE_GPIO_PIN
+
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
+void ADC0_IRQHandler(void);
+void ADC_init(void);
+
+
 static void task_100ms(void *pvParameters);
 static void task_50ms(void *pvParameters);
 static void task_rx(void *pvParameters);
@@ -74,10 +88,19 @@ volatile uint32_t received_mb_idx;
 flexcan_handle_t flexcanHandle;
 flexcan_mb_transfer_t tx100Xfer, tx50Xfer, rx1Xfer, rx2Xfer;
 flexcan_frame_t tx100Frame, tx50Frame, rx1Frame, rx2Frame;
-uint32_t tx100Identifier = 0x100;
-uint32_t tx50Identifier = 0x50;
-uint32_t rx1Identifier = 0x101;
-uint32_t rx2Identifier = 0x102;
+uint32_t tx100Identifier = 0x020;  // nodo 1 simulacion
+uint32_t tx50Identifier = 0x020;
+uint32_t rx1Identifier = 0x010;  // nodo1
+uint32_t rx2Identifier = 0x011;  // nodo1
+uint16_t adc1 = 0;               // nodo1
+uint8_t period1 = 10;             // nodo1
+
+// ADC
+volatile bool g_Adc16ConversionDoneFlag = false;
+volatile uint32_t g_Adc16ConversionValue;
+static adc16_channel_config_t adc16ChannelConfigStruct;
+
+
 
 /*******************************************************************************
  * Code
@@ -88,6 +111,39 @@ uint32_t rx2Identifier = 0x102;
 /*!
  * @brief FlexCAN Call Back function
  */
+
+void ADC0_IRQHandler(void)
+{
+    g_Adc16ConversionDoneFlag = true;
+    g_Adc16ConversionValue = ADC16_GetChannelConversionValue(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP);
+    /* Add for ARM errata 838869, affects Cortex-M4, Cortex-M4F Store immediate overlapping
+      exception return operation might vector to incorrect interrupt */
+#if defined __CORTEX_M && (__CORTEX_M == 4U)
+    __DSB();
+#endif
+}
+
+void ADC_init(void)
+{
+    adc16_config_t adc16ConfigStruct;
+
+
+    NVIC_EnableIRQ(ADC0_IRQn);
+    ADC16_GetDefaultConfig(&adc16ConfigStruct);
+    ADC16_Init(DEMO_ADC16_BASE, &adc16ConfigStruct);
+    ADC16_EnableHardwareTrigger(DEMO_ADC16_BASE, false); /* Make sure the software trigger is used. */
+    (void)ADC16_DoAutoCalibration(DEMO_ADC16_BASE);
+    adc16ChannelConfigStruct.channelNumber = DEMO_ADC16_USER_CHANNEL;
+    adc16ChannelConfigStruct.enableInterruptOnConversionCompleted = true;
+    adc16ChannelConfigStruct.enableDifferentialConversion = false;
+    ADC16_SetChannelConfig(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP, &adc16ChannelConfigStruct);
+
+}
+
+
+
+
+
 static void flexcan_callback(CAN_Type *base, flexcan_handle_t *handle, status_t status, uint32_t result, void *userData)
 {
     switch (status)
@@ -163,8 +219,9 @@ int main(void)
 	BOARD_BootClockRUN();
 	BOARD_InitDebugConsole();
 	CAN_Init();
+	ADC_init();
 
-    xTaskCreate(task_100ms, "100ms Task", configMINIMAL_STACK_SIZE + 10, NULL, hello_task_PRIORITY, NULL);
+    //xTaskCreate(task_100ms, "100ms Task", configMINIMAL_STACK_SIZE + 10, NULL, hello_task_PRIORITY, NULL);
     xTaskCreate(task_50ms, "50ms Task", configMINIMAL_STACK_SIZE + 10, NULL, hello_task_PRIORITY, NULL);
     xTaskCreate(task_rx, "rx Task", (configMINIMAL_STACK_SIZE + 10)*2, NULL, hello_task_PRIORITY, NULL);
     vTaskStartScheduler();
@@ -198,11 +255,12 @@ static void task_100ms(void *pvParameters)
     	tx100Xfer.mbIdx = TX100_MESSAGE_BUFFER_NUM;
     	FLEXCAN_TransferSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &tx100Xfer);
 
-    	tx100Frame.dataByte0 = 100;
-    	tx100Frame.dataByte1++;
+    	tx100Frame.dataByte0 = (adc1>>4)&0x00FF;  //nodo1
+    	tx100Frame.dataByte0 = (adc1<<4)&0x00F0;;  // nodo1
 
         // Wait for the next cycle.
-        vTaskDelayUntil( &xLastWakeTime, xFrequency);
+        vTaskDelayUntil(  &xLastWakeTime, (xFrequency*period1)/portTICK_PERIOD_MS);  //nodo1
+        adc1 += 100;   //nodo1
     }
 }
 
@@ -231,11 +289,22 @@ static void task_50ms(void *pvParameters)
     	tx50Xfer.mbIdx = TX50_MESSAGE_BUFFER_NUM;
     	FLEXCAN_TransferSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &tx50Xfer);
 
-    	tx50Frame.dataByte0 = 50;
-    	tx50Frame.dataByte1++;
+    	tx50Frame.dataByte0 = (g_Adc16ConversionValue>>4)&0xFFFF; //nodo1
+    	//tx50Frame.dataByte1 = (g_Adc16ConversionValue>>2)&0xFF00;;  // nodo1
+
+    	//tx50Frame.dataByte0 = 50;
+    	//tx50Frame.dataByte1++;
+
+
+    	// Send to update ADC
+    	if(true == g_Adc16ConversionDoneFlag)
+    	{
+    		ADC16_SetChannelConfig(DEMO_ADC16_BASE, DEMO_ADC16_CHANNEL_GROUP, &adc16ChannelConfigStruct);
+    		g_Adc16ConversionDoneFlag = false;
+    	}
 
         // Wait for the next cycle.
-        vTaskDelayUntil( &xLastWakeTime, xFrequency);
+        vTaskDelayUntil( &xLastWakeTime, (xFrequency*period1)/portTICK_PERIOD_MS);
     }
 }
 
@@ -246,7 +315,14 @@ static void task_rx(void *pvParameters)
 {
 	volatile uint32_t can_flags = 0;
 	flexcan_frame_t* rxFrame;
+    /* Define the init structure for the output LED pin*/
+    gpio_pin_config_t led_config = {
+        kGPIO_DigitalOutput,
+        0,
+    };
 
+	GPIO_PinInit(BOARD_LED_B_GPIO, BOARD_LED_B_GPIO_PIN, &led_config);
+	LED_BLUE_OFF();
 	// Initialize the xLastWakeTime variable with the current time.
     for (;;)
     {
@@ -275,6 +351,8 @@ static void task_rx(void *pvParameters)
             	rx1Xfer.mbIdx = RX1_MESSAGE_BUFFER_NUM;
         		FLEXCAN_TransferReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rx1Xfer);
     			rxFrame = &rx1Frame;
+    			if((rx1Frame.dataByte0 & 0x01) == 1) PRINTF("LED ON\r\n"), LED_BLUE_ON();  //nodo1
+    			else PRINTF("LED OFF\r\n"), LED_BLUE_OFF();  //nodp1
     			break;
     		case RX2_MESSAGE_BUFFER_NUM:
     			/* Start the reception over */
@@ -282,6 +360,7 @@ static void task_rx(void *pvParameters)
             	rx2Xfer.mbIdx = RX2_MESSAGE_BUFFER_NUM;
         		FLEXCAN_TransferReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rx2Xfer);
     			rxFrame = &rx2Frame;
+    			period1 = rx2Frame.dataByte0;
     			break;
     		default:
     			break;
